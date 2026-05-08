@@ -1,239 +1,159 @@
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { z } from "zod";
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { z } from 'zod';
+import dotenv from 'dotenv';
+import { fileURLToPath } from 'url';
+import { dirname, join } from 'path';
+import { buildIndex, searchArticles, Article } from './search.js';
 
-const NWS_API_BASE = "https://api.weather.gov";
-const USER_AGENT = "weather-app/1.0";
+const __dirname = dirname(fileURLToPath(import.meta.url));
+dotenv.config({ path: join(__dirname, '..', '.env') });
 
-// Create server instance
+
+const ZENDESK_SUBDOMAIN = process.env.ZENDESK_SUBDOMAIN!;
+const ZENDESK_EMAIL = process.env.ZENDESK_EMAIL!;
+const ZENDESK_API_TOKEN = process.env.ZENDESK_API_TOKEN!;
+const NANO_BANANA_API_KEY = process.env.NANO_BANANA_API_KEY!;
+
 const server = new McpServer({
-  name: "weather",
-  version: "1.0.0",
+  name: 'z-emotion',
+  version: '1.0.0',
 });
 
-// Helper function for making NWS API requests
-async function makeNWSRequest<T>(url: string): Promise<T | null> {
-  const headers = {
-    "User-Agent": USER_AGENT,
-    Accept: "application/geo+json",
-  };
+// --- Zendesk article fetching ---
 
-  try {
-    const response = await fetch(url, { headers });
-    if (!response.ok) {
-      throw new Error(`HTTP error! status: ${response.status}`);
+function getAuthHeader(): string {
+  const credentials = Buffer.from(`${ZENDESK_EMAIL}/token:${ZENDESK_API_TOKEN}`).toString('base64');
+  return `Basic ${credentials}`;
+}
+
+async function fetchAllArticles(): Promise<Article[]> {
+  const articles: Article[] = [];
+  let nextPage: string | null = `https://${ZENDESK_SUBDOMAIN}/api/v2/help_center/articles.json?per_page=100`;
+
+  const categoryMap = new Map<number, string>();
+  const catRes = await fetch(`https://${ZENDESK_SUBDOMAIN}/api/v2/help_center/categories.json?per_page=100`, {
+    headers: { Authorization: getAuthHeader() },
+  });
+  const catData = await catRes.json() as { categories: { id: number; name: string }[] };
+  for (const c of catData.categories) categoryMap.set(c.id, c.name);
+
+  const sectionMap = new Map<number, string>();
+  const secRes = await fetch(`https://${ZENDESK_SUBDOMAIN}/api/v2/help_center/sections.json?per_page=100`, {
+    headers: { Authorization: getAuthHeader() },
+  });
+  const secData = await secRes.json() as { sections: { id: number; name: string; category_id: number }[] };
+  for (const s of secData.sections) sectionMap.set(s.id, categoryMap.get(s.category_id) ?? 'Unknown');
+
+  while (nextPage) {
+    const res = await fetch(nextPage, { headers: { Authorization: getAuthHeader() } });
+    const data = await res.json() as { articles: any[]; next_page: string | null };
+    for (const a of data.articles) {
+      if (a.draft) continue;
+      const body = a.body
+        .replace(/<br\s*\/?>|<\/p>|<\/div>|<\/li>|<\/h[1-6]>/gi, '\n')
+        .replace(/<[^>]+>/g, '')
+        .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&nbsp;/g, ' ')
+        .replace(/\n{3,}/g, '\n\n').trim();
+      articles.push({
+        id: a.id,
+        title: a.title,
+        body,
+        url: a.html_url,
+        section: sectionMap.get(a.section_id) ?? 'Unknown',
+      });
     }
-    return (await response.json()) as T;
-  } catch (error) {
-    console.error("Error making NWS request:", error);
-    return null;
+    nextPage = data.next_page;
   }
+
+  return articles;
 }
 
-interface AlertFeature {
-  properties: {
-    event?: string;
-    areaDesc?: string;
-    severity?: string;
-    status?: string;
-    headline?: string;
-  };
-}
-
-// Format alert data
-function formatAlert(feature: AlertFeature): string {
-  const props = feature.properties;
-  return [
-    `Event: ${props.event || "Unknown"}`,
-    `Area: ${props.areaDesc || "Unknown"}`,
-    `Severity: ${props.severity || "Unknown"}`,
-    `Status: ${props.status || "Unknown"}`,
-    `Headline: ${props.headline || "No headline"}`,
-    "---",
-  ].join("\n");
-}
-
-interface ForecastPeriod {
-  name?: string;
-  temperature?: number;
-  temperatureUnit?: string;
-  windSpeed?: string;
-  windDirection?: string;
-  shortForecast?: string;
-}
-
-interface AlertsResponse {
-  features: AlertFeature[];
-}
-
-interface PointsResponse {
-  properties: {
-    forecast?: string;
-  };
-}
-
-interface ForecastResponse {
-  properties: {
-    periods: ForecastPeriod[];
-  };
-}
-
-// Register weather tools
+// --- Tool: search_help_articles ---
 
 server.registerTool(
-  "get_alerts",
+  'search_help_articles',
   {
-    description: "Get weather alerts for a state",
+    description: 'Search Z-Emotion help center articles. Use for any question about z-weave, z-maya, or z-unreal features, installation, settings, or tutorials.',
     inputSchema: {
-      state: z
-        .string()
-        .length(2)
-        .describe("Two-letter state code (e.g. CA, NY)"),
+      query: z.string().describe('Search query in English'),
+      top_n: z.number().min(1).max(5).optional().describe('Number of articles to return (default 3)'),
     },
   },
-  async ({ state }) => {
-    const stateCode = state.toUpperCase();
-    const alertsUrl = `${NWS_API_BASE}/alerts?area=${stateCode}`;
-    const alertsData = await makeNWSRequest<AlertsResponse>(alertsUrl);
-
-    if (!alertsData) {
-      return {
-        content: [
-          {
-            type: "text",
-            text: "Failed to retrieve alerts data",
-          },
-        ],
-      };
+  async ({ query, top_n }) => {
+    const articles = await searchArticles(query, top_n ?? 3);
+    if (articles.length === 0) {
+      return { content: [{ type: 'text', text: 'No articles found.' }] };
     }
-
-    const features = alertsData.features || [];
-    if (!features.length) {
-      return {
-        content: [
-          {
-            type: "text",
-            text: `No active alerts for ${stateCode}`,
-          },
-        ],
-      };
-    }
-
-    const formattedAlerts = features.map(formatAlert);
-    const alertsText = `Active alerts for ${stateCode}:\n\n${formattedAlerts.join("\n")}`;
-
-    return {
-      content: [
-        {
-          type: "text",
-          text: alertsText,
-        },
-      ],
-    };
-  },
+    const text = articles
+      .map((a) => `Title: ${a.title}\nSection: ${a.section}\nURL: ${a.url}\n\n${a.body}`)
+      .join('\n\n---\n\n');
+    return { content: [{ type: 'text', text }] };
+  }
 );
+
+// --- Tool: generate_fashion_image ---
 
 server.registerTool(
-  "get_forecast",
+  'generate_fashion_image',
   {
-    description: "Get weather forecast for a location",
+    description: 'Generate a fashion image from a text prompt using Nano Banana. Use when the user asks to visualize an outfit, garment, or fashion concept.',
     inputSchema: {
-      latitude: z
-        .number()
-        .min(-90)
-        .max(90)
-        .describe("Latitude of the location"),
-      longitude: z
-        .number()
-        .min(-180)
-        .max(180)
-        .describe("Longitude of the location"),
+      prompt: z.string().describe('Description of the fashion image to generate'),
     },
   },
-  async ({ latitude, longitude }) => {
-    // Get grid point data
-    const pointsUrl = `${NWS_API_BASE}/points/${latitude.toFixed(4)},${longitude.toFixed(4)}`;
-    const pointsData = await makeNWSRequest<PointsResponse>(pointsUrl);
-
-    if (!pointsData) {
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Failed to retrieve grid point data for coordinates: ${latitude}, ${longitude}. This location may not be supported by the NWS API (only US locations are supported).`,
-          },
-        ],
-      };
+  async ({ prompt }) => {
+    if (!NANO_BANANA_API_KEY) {
+      return { content: [{ type: 'text', text: 'Image generation is not configured.' }] };
     }
-
-    const forecastUrl = pointsData.properties?.forecast;
-    if (!forecastUrl) {
-      return {
-        content: [
-          {
-            type: "text",
-            text: "Failed to get forecast URL from grid point data",
-          },
-        ],
-      };
-    }
-
-    // Get forecast data
-    const forecastData = await makeNWSRequest<ForecastResponse>(forecastUrl);
-    if (!forecastData) {
-      return {
-        content: [
-          {
-            type: "text",
-            text: "Failed to retrieve forecast data",
-          },
-        ],
-      };
-    }
-
-    const periods = forecastData.properties?.periods || [];
-    if (periods.length === 0) {
-      return {
-        content: [
-          {
-            type: "text",
-            text: "No forecast periods available",
-          },
-        ],
-      };
-    }
-
-    // Format forecast periods
-    const formattedForecast = periods.map((period: ForecastPeriod) =>
-      [
-        `${period.name || "Unknown"}:`,
-        `Temperature: ${period.temperature || "Unknown"}°${period.temperatureUnit || "F"}`,
-        `Wind: ${period.windSpeed || "Unknown"} ${period.windDirection || ""}`,
-        `${period.shortForecast || "No forecast available"}`,
-        "---",
-      ].join("\n"),
-    );
-
-    const forecastText = `Forecast for ${latitude}, ${longitude}:\n\n${formattedForecast.join("\n")}`;
-
-    return {
-      content: [
-        {
-          type: "text",
-          text: forecastText,
+    try {
+      const res = await fetch('https://api.nanobana.ai/generate', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${NANO_BANANA_API_KEY}`,
         },
-      ],
-    };
-  },
+        body: JSON.stringify({ prompt }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json() as { url?: string };
+      if (!data.url) throw new Error('No image URL in response');
+      return { content: [{ type: 'text', text: `Generated image: ${data.url}` }] };
+    } catch (err) {
+      return { content: [{ type: 'text', text: `Image generation failed: ${err}` }] };
+    }
+  }
 );
+
+// --- Tool: search_asset_library (stub) ---
+
+server.registerTool(
+  'search_asset_library',
+  {
+    description: 'Search the Z-Emotion asset library for 3D and 2D pattern files hosted on AWS. (Coming soon)',
+    inputSchema: {
+      query: z.string().describe('Search query for patterns or assets'),
+    },
+  },
+  async ({ query: _query }) => {
+    return { content: [{ type: 'text', text: 'Asset library search is not yet available.' }] };
+  }
+);
+
+// --- Startup ---
 
 async function main() {
+  console.error('Loading Z-Emotion help center articles...');
+  const articles = await fetchAllArticles();
+  await buildIndex(articles);
+  console.error(`Index ready with ${articles.length} articles.`);
+
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error("Weather MCP Server running on stdio");
+  console.error('Z-Emotion MCP Server running on stdio');
 }
 
 main().catch((error) => {
-  console.error("Fatal error in main():", error);
+  console.error('Fatal error in main():', error);
   process.exit(1);
 });

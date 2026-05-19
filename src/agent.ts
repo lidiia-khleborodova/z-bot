@@ -10,8 +10,8 @@ Tools: search_articles (help center), get_latest_version (release notes), search
 
 Rules:
 - For greetings or general conversation (e.g. "hi", "hello", "thanks"), respond directly without calling any tool.
-- If the user wants to find or download a pattern file, call search_patterns.
-- For all other product questions, call search_articles first. If it returns no results or doesn't answer, use web_search before giving up.
+- If the user wants to find, search, or download a garment pattern or fabric — call search_patterns immediately, do not call search_articles.
+- For all other product questions, call search_articles once. Do not call search_articles more than once. If results don't answer the question, use web_search once before giving up.
 - Prefer manual section articles over FAQ.
 - Include YouTube links if the user asked for a tutorial and the article has them.
 - Include images using markdown: ![alt](url). Place after the relevant step.
@@ -155,10 +155,9 @@ export async function* askAgent(
     messages.push({ role: 'assistant', content: response.content });
 
     if (response.stop_reason === 'end_turn') {
-      for (const chunk of chunks) yield { chunk };
-      yield {
-        assistantMessage: { role: 'assistant', content: fullText },
-      };
+      console.log('[fullText preview]', fullText.slice(0, 300));
+      yield { chunk: fullText };
+      yield { assistantMessage: { role: 'assistant', content: fullText } };
       break;
     }
 

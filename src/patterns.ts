@@ -120,39 +120,51 @@ export async function loadAssets(): Promise<void> {
   }, REFRESH_INTERVAL_MS);
 }
 
-export async function searchAssets(query: string, threshold = 0.5): Promise<Asset[]> {
+const MATERIALS = ['cotton','polyester','silk','wool','linen','nylon','rayon','spandex','lycra','denim','leather','velvet','satin','chiffon','modal','bamboo','viscose','acrylic','cashmere','hemp'];
+
+export async function searchAssets(query: string): Promise<Asset[]> {
   if (embeddedAssets.length === 0) return [];
   const queryLower = query.toLowerCase();
   const queryEmbedding = await embed(query);
-
-  const MATERIALS = ['cotton','polyester','silk','wool','linen','nylon','rayon','spandex','lycra','denim','leather','velvet','satin','chiffon','modal','bamboo','viscose','acrylic','cashmere','hemp'];
-
   const mentionedMaterial = MATERIALS.find((m) => queryLower.includes(m));
 
   const scored = embeddedAssets.map(({ asset, embedding }) => {
     let score = cosineSimilarity(queryEmbedding, embedding);
+
+    // boost if name or styleType contains query words
+    const assetText = `${asset.name} ${asset.styleType}`.toLowerCase();
+    const queryWords = queryLower.split(/\s+/).filter((w) => w.length > 2);
+    if (queryWords.some((w) => assetText.includes(w))) score += 0.1;
+
+    // boost color match
     const colorMatch = asset.color.length > 0 && asset.color.some(
       (c) => queryLower.includes(c.toLowerCase()) || c.toLowerCase().includes(queryLower.split(' ')[0])
     );
     if (colorMatch) score += 0.1;
+
     return { asset, score, colorMatch };
   });
 
   const queryMentionsColor = scored.some((s) => s.colorMatch);
 
-  return scored
+  console.log('[asset scores]\n' + [...scored].sort((a, b) => b.score - a.score).slice(0, 100).map((s) => `  "${s.asset.name}": ${s.score.toFixed(3)}`).join('\n'));
+
+  // use lower threshold for garments (no color/composition metadata to differentiate)
+  const results = scored
     .filter((s) => {
+      const threshold = s.asset.category === 'garment' ? 0.4 : 0.5;
       if (s.score < threshold) return false;
-      // if query mentions a material, require it to appear in composition
       if (mentionedMaterial && s.asset.composition) {
         if (!s.asset.composition.toLowerCase().includes(mentionedMaterial)) return false;
       }
-      // if query mentions a color, require color match for color-tagged assets
       if (queryMentionsColor && s.asset.color.length > 0) return s.colorMatch;
       return true;
     })
     .sort((a, b) => b.score - a.score)
     .map((s) => s.asset);
+
+  console.log(`[asset results] ${results.length} assets matched`);
+  return results;
 }
 
 export function formatAssetResults(assets: Asset[]): string {

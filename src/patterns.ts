@@ -49,10 +49,10 @@ function mapRawAsset(r: RawAsset): Asset {
 }
 
 function assetEmbedText(a: Asset): string {
-  const parts = [a.name, a.category, a.styleType, a.gender];
-  if (a.color.length > 0) parts.push(a.color.join(' '), a.color.join(' ')); // repeat for weight
+  const parts = [a.name, a.name, a.gender, a.styleType];
+  if (a.color.length > 0) parts.push(a.color.join(' '), a.color.join(' '));
   if (a.texture) parts.push(a.texture);
-  if (a.composition) parts.push(a.composition, a.composition, a.composition); // repeat composition heavily
+  if (a.composition) parts.push(a.composition, a.composition, a.composition);
   return parts.filter(Boolean).join(' ');
 }
 
@@ -128,17 +128,19 @@ export async function searchAssets(query: string): Promise<Asset[]> {
   const queryEmbedding = await embed(query);
   const mentionedMaterial = MATERIALS.find((m) => queryLower.includes(m));
 
+  const queryWords = queryLower.split(/\s+/).filter((w: string) => w.length > 2);
+
   const scored = embeddedAssets.map(({ asset, embedding }) => {
     let score = cosineSimilarity(queryEmbedding, embedding);
 
-    // boost if name or styleType contains query words
-    const assetText = `${asset.name} ${asset.styleType}`.toLowerCase();
-    const queryWords = queryLower.split(/\s+/).filter((w) => w.length > 2);
-    if (queryWords.some((w) => assetText.includes(w))) score += 0.1;
+    const nameLower = asset.name.toLowerCase();
 
-    // boost color match
+    // strong boost: query word appears directly in asset name
+    if (queryWords.some((w: string) => nameLower.includes(w))) score += 0.2;
+
+    // color boost
     const colorMatch = asset.color.length > 0 && asset.color.some(
-      (c) => queryLower.includes(c.toLowerCase()) || c.toLowerCase().includes(queryLower.split(' ')[0])
+      (c) => queryLower.includes(c.toLowerCase()) || c.toLowerCase().includes(queryWords[0] ?? '')
     );
     if (colorMatch) score += 0.1;
 
@@ -146,13 +148,17 @@ export async function searchAssets(query: string): Promise<Asset[]> {
   });
 
   const queryMentionsColor = scored.some((s) => s.colorMatch);
+  const queryMentionsFabric = queryLower.includes('fabric') || queryLower.includes('material') || queryLower.includes('textile');
+  const queryMentionsGarment = queryLower.includes('pattern') || queryLower.includes('garment') || queryLower.includes('clothing');
 
-  console.log('[asset scores]\n' + [...scored].sort((a, b) => b.score - a.score).slice(0, 100).map((s) => `  "${s.asset.name}": ${s.score.toFixed(3)}`).join('\n'));
+  console.log('[asset scores]\n' + [...scored].sort((a, b) => b.score - a.score).slice(0, 30).map((s) => `  "${s.asset.name}": ${s.score.toFixed(3)}`).join('\n'));
 
   // use lower threshold for garments (no color/composition metadata to differentiate)
   const results = scored
     .filter((s) => {
-      const threshold = s.asset.category === 'garment' ? 0.4 : 0.5;
+      if (queryMentionsFabric && s.asset.category === 'garment') return false;
+      if (queryMentionsGarment && s.asset.category === 'fabric') return false;
+      const threshold = s.asset.category === 'garment' ? 0.45 : 0.5;
       if (s.score < threshold) return false;
       if (mentionedMaterial && s.asset.composition) {
         if (!s.asset.composition.toLowerCase().includes(mentionedMaterial)) return false;

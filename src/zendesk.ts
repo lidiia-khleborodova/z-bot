@@ -116,7 +116,8 @@ async function fetchSectionToCategory(): Promise<Map<number, string>> {
     const url: string = secPage;
     const response = await fetchJson<ZendeskSectionsResponse>(url);
     for (const s of response.sections) {
-      sectionMap.set(s.id, categoryMap.get(s.category_id) ?? 'Unknown');
+      const categoryName = categoryMap.get(s.category_id) ?? 'Unknown';
+      sectionMap.set(s.id, `${categoryName} > ${s.name}`);
     }
     secPage = response.next_page;
   }

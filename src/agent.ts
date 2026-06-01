@@ -16,10 +16,10 @@ Rules:
 - Include YouTube links if the user asked for a tutorial and the article has them.
 - Include images using markdown: ![alt](url). Place after the relevant step.
 - Answer only from retrieved content. Never use general knowledge.
-- End every answer with exactly this format on its own line: "Find the source here: [Title](url)"
+- End every answer with exactly one line in this format: "Find the source here: [Title1](url1), [Title2](url2)" — listing all articles used, separated by commas, on a single line.
 - Never use horizontal dividers (---, ***, ___). Never output "---" under any circumstances.
-- No emojis, no filler phrases ("Let me check" etc.), no mention of sources.
-- If no answer found, suggest https://z-emotion.com or contacting support.
+- No emojis. Never use filler phrases such as "Let me check", "Let me search", "Let me look that up", "I'll check", "I found", "Based on the retrieved content", "The search results", "The help center", "The help center articles", "According to the article", "The article does not include", "does not appear in" — or any phrase that reveals you are searching, retrieving data, or referencing internal sources. Start your answer directly with the substance.
+- If specific information is not available, say "I could not find relevant information on that." then suggest https://z-emotion.com or contacting support.
 - If user writes in another language, search in English, reply in their language.`;
 
 const TOOLS: Anthropic.Tool[] = [
@@ -37,7 +37,7 @@ const TOOLS: Anthropic.Tool[] = [
   },
   {
     name: 'get_latest_version',
-    description: 'Returns the latest release notes for a specific Z-Emotion app by sorting version numbers. Use when the user asks about the latest version, recent updates, or changelog.',
+    description: 'Returns the most recent release notes for a specific Z-Emotion app. Use only when the user asks about the latest or most recent version. For questions about a specific version number (e.g. "what is in 4.1.0"), use search_articles instead.',
     input_schema: {
       type: 'object' as const,
       properties: {
@@ -70,31 +70,21 @@ async function executeTool(name: string, input: Record<string, unknown>): Promis
     const topN = Math.min((input.top_n as number | undefined) ?? 3, 5);
     const articles = await searchArticles(query, topN);
     if (articles.length === 0) return 'No articles found.';
-    const allImages = articles.flatMap((a) => a.images.filter((img) => img.alt && !/^Screenshot\s[\d\-. ]+\.png$/i.test(img.alt)));
-    const imageSection = allImages.length > 0
-      ? `\n\nRelevant images:\n${allImages.map((img) => `![${img.alt}](${img.src})`).join('\n')}`
-      : '';
-    const articleText = articles.map((a) =>
-      `Title: ${a.title}\nSection: ${a.section}\nURL: ${a.url}\n\n${a.body}`
-    ).join('\n\n---\n\n');
+    const articleText = articles.map((a) => {
+      const images = a.images.filter((img) => img.alt && !/^Screenshot\s[\d\-. ]+\.png$/i.test(img.alt));
+      const imageSection = images.length > 0
+        ? `\n\nImages from this article:\n${images.map((img) => `![${img.alt}](${img.src})`).join('\n')}`
+        : '';
+      return `Title: ${a.title}\nSection: ${a.section}\nURL: ${a.url}\n\n${a.body}${imageSection}`;
+    }).join('\n\n---\n\n');
     console.log('[search_articles]', articles.map((a) => `"${a.title}" (${a.section})`).join(', '));
-    return articleText + imageSection;
+    return articleText;
   }
 
   if (name === 'get_latest_version') {
     const app = (input.app as string).toLowerCase();
-    const parseVersion = (title: string): number[] => {
-      const match = title.match(/^(\d+)\.(\d+)(?:\.(\d+))?/);
-      return match ? [+match[1], +match[2], +(match[3] ?? 0)] : [-1, -1, -1];
-    };
-    const compareVersions = (a: number[], b: number[]): number => {
-      for (let i = 0; i < 3; i++) if (b[i] !== a[i]) return b[i] - a[i];
-      return 0;
-    };
-    const appArticles = getAllArticles().filter((a) => a.section.toLowerCase().includes(app));
-    const versionArticles = appArticles
-      .filter((a) => /^\d+\.\d+/.test(a.title))
-      .sort((a, b) => compareVersions(parseVersion(a.title), parseVersion(b.title)))
+    const versionArticles = getAllArticles()
+      .filter((a) => a.section.toLowerCase().includes(app) && a.section.toLowerCase().includes('release'))
       .slice(0, 3);
     if (versionArticles.length === 0) return `No release notes found for ${app}.`;
     console.log('[get_latest_version]', versionArticles.map((a) => `"${a.title}"`).join(', '));
@@ -179,8 +169,7 @@ export async function* askAgent(
         return;
       }
 
-      // for other tools, flush buffered text first
-      for (const chunk of chunks) yield { chunk };
+      // discard any text Claude emitted before calling the tool (meta-commentary)
 
       const toolResults: Anthropic.ToolResultBlockParam[] = await Promise.all(
         toolUseBlocks.map(async (toolUse) => {

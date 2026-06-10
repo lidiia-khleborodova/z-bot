@@ -1,6 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { searchArticles, getAllArticles } from './search';
-import { searchPatterns, formatPatternResults } from './patterns';
+import { searchAssets, formatAssetResults } from './patterns';
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY! });
 
@@ -9,20 +9,23 @@ const SYSTEM_PROMPT = `You are a helpful support assistant for Z-Emotion.
 Tools: search_articles (help center), get_latest_version (release notes), search_patterns (asset library patterns), web_search (web, only if search_articles fails), web_fetch (only if user provides a URL).
 
 Rules:
-- Always call search_articles first. If it returns no results or doesn't answer, use web_search before giving up.
+- For greetings or general conversation (e.g. "hi", "hello", "thanks"), respond directly without calling any tool.
+- If the user wants to find, search, or download a garment pattern or fabric — call search_patterns immediately, do not call search_articles.
+- For all other product questions, call search_articles once. Do not call search_articles more than once. If results don't answer the question, use web_search once before giving up.
 - Prefer manual section articles over FAQ.
 - Include YouTube links if the user asked for a tutorial and the article has them.
 - Include images using markdown: ![alt](url). Place after the relevant step.
 - Answer only from retrieved content. Never use general knowledge.
-- End every answer with a markdown link to the source article: [Title](url).
-- No emojis, no dividers, no filler phrases ("Let me check" etc.), no mention of sources.
-- If no answer found, suggest https://z-emotion.com or contacting support.
+- End every answer with exactly one line in this format: "Find the source here: [Title1](url1), [Title2](url2)" — listing all articles used, separated by commas, on a single line.
+- Never use horizontal dividers (---, ***, ___). Never output "---" under any circumstances.
+- No emojis. Never use filler phrases such as "Let me check", "Let me search", "Let me look that up", "I'll check", "I found", "Based on the retrieved content", "The search results", "The help center", "The help center articles", "According to the article", "The article does not include", "does not appear in" — or any phrase that reveals you are searching, retrieving data, or referencing internal sources. Start your answer directly with the substance.
+- If specific information is not available, say "I could not find relevant information on that." then suggest https://z-emotion.com or contacting support.
 - If user writes in another language, search in English, reply in their language.`;
 
 const TOOLS: Anthropic.Tool[] = [
   {
     name: 'search_articles',
-    description: 'Search Z-Emotion help center articles by semantic similarity. Returns the most relevant articles for the query.',
+    description: 'Search Z-Emotion help center articles by semantic similarity. Always translate the query to English before searching. Returns the most relevant articles for the query.',
     input_schema: {
       type: 'object' as const,
       properties: {
@@ -34,7 +37,7 @@ const TOOLS: Anthropic.Tool[] = [
   },
   {
     name: 'get_latest_version',
-    description: 'Returns the latest release notes for a specific Z-Emotion app by sorting version numbers. Use when the user asks about the latest version, recent updates, or changelog.',
+    description: 'Returns the most recent release notes for a specific Z-Emotion app. Use only when the user asks about the latest or most recent version. For questions about a specific version number (e.g. "what is in 4.1.0"), use search_articles instead.',
     input_schema: {
       type: 'object' as const,
       properties: {
@@ -45,7 +48,7 @@ const TOOLS: Anthropic.Tool[] = [
   },
   {
     name: 'search_patterns',
-    description: 'Search the Z-Emotion asset library for downloadable sewing patterns (ZLS files). Use only when the user wants to find or download a pattern.',
+    description: 'Search the Z-Emotion asset library for downloadable ZLS pattern files. Use only when the user wants to find or download a pattern. Always translate the query to English before searching. Output the tool result exactly as-is without any modification.',
     input_schema: {
       type: 'object' as const,
       properties: {
@@ -67,31 +70,21 @@ async function executeTool(name: string, input: Record<string, unknown>): Promis
     const topN = Math.min((input.top_n as number | undefined) ?? 3, 5);
     const articles = await searchArticles(query, topN);
     if (articles.length === 0) return 'No articles found.';
-    const allImages = articles.flatMap((a) => a.images.filter((img) => img.alt && !/^Screenshot\s[\d\-. ]+\.png$/i.test(img.alt)));
-    const imageSection = allImages.length > 0
-      ? `\n\nRelevant images:\n${allImages.map((img) => `![${img.alt}](${img.src})`).join('\n')}`
-      : '';
-    const articleText = articles.map((a) =>
-      `Title: ${a.title}\nSection: ${a.section}\nURL: ${a.url}\n\n${a.body}`
-    ).join('\n\n---\n\n');
+    const articleText = articles.map((a) => {
+      const images = a.images.filter((img) => img.alt && !/^Screenshot\s[\d\-. ]+\.png$/i.test(img.alt));
+      const imageSection = images.length > 0
+        ? `\n\nImages from this article:\n${images.map((img) => `![${img.alt}](${img.src})`).join('\n')}`
+        : '';
+      return `Title: ${a.title}\nSection: ${a.section}\nURL: ${a.url}\n\n${a.body}${imageSection}`;
+    }).join('\n\n---\n\n');
     console.log('[search_articles]', articles.map((a) => `"${a.title}" (${a.section})`).join(', '));
-    return articleText + imageSection;
+    return articleText;
   }
 
   if (name === 'get_latest_version') {
     const app = (input.app as string).toLowerCase();
-    const parseVersion = (title: string): number[] => {
-      const match = title.match(/^(\d+)\.(\d+)(?:\.(\d+))?/);
-      return match ? [+match[1], +match[2], +(match[3] ?? 0)] : [-1, -1, -1];
-    };
-    const compareVersions = (a: number[], b: number[]): number => {
-      for (let i = 0; i < 3; i++) if (b[i] !== a[i]) return b[i] - a[i];
-      return 0;
-    };
-    const appArticles = getAllArticles().filter((a) => a.section.toLowerCase().includes(app));
-    const versionArticles = appArticles
-      .filter((a) => /^\d+\.\d+/.test(a.title))
-      .sort((a, b) => compareVersions(parseVersion(a.title), parseVersion(b.title)))
+    const versionArticles = getAllArticles()
+      .filter((a) => a.section.toLowerCase().includes(app) && a.section.toLowerCase().includes('release'))
       .slice(0, 3);
     if (versionArticles.length === 0) return `No release notes found for ${app}.`;
     console.log('[get_latest_version]', versionArticles.map((a) => `"${a.title}"`).join(', '));
@@ -100,8 +93,8 @@ async function executeTool(name: string, input: Record<string, unknown>): Promis
 
   if (name === 'search_patterns') {
     const query = input.query as string;
-    const patterns = await searchPatterns(query);
-    return formatPatternResults(patterns);
+    const assets = await searchAssets(query);
+    return formatAssetResults(assets);
   }
 
   return 'Unknown tool.';
@@ -139,11 +132,12 @@ export async function* askAgent(
     });
 
     let fullText = '';
+    const chunks: string[] = [];
 
     for await (const event of stream) {
       if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
         fullText += event.delta.text;
-        yield { chunk: event.delta.text };
+        chunks.push(event.delta.text);
       }
     }
 
@@ -151,9 +145,9 @@ export async function* askAgent(
     messages.push({ role: 'assistant', content: response.content });
 
     if (response.stop_reason === 'end_turn') {
-      yield {
-        assistantMessage: { role: 'assistant', content: fullText },
-      };
+      console.log('[fullText preview]', fullText.slice(0, 300));
+      yield { chunk: fullText };
+      yield { assistantMessage: { role: 'assistant', content: fullText } };
       break;
     }
 
@@ -161,6 +155,21 @@ export async function* askAgent(
       const toolUseBlocks = response.content.filter(
         (b): b is Anthropic.ToolUseBlock => b.type === 'tool_use'
       );
+
+      console.log('[tool_use]', toolUseBlocks.map((b) => b.name).join(', '));
+
+      // handle search_patterns directly — yield result and stop so Claude never reformats it
+      const patternTool = toolUseBlocks.find((b) => b.name === 'search_patterns');
+      if (patternTool) {
+        const result = await executeTool('search_patterns', patternTool.input as Record<string, unknown>);
+        const hasAssets = result.startsWith('ASSET_RESULTS:');
+        const intro = hasAssets ? 'Here are the matching patterns from the asset library:\n\n' : '';
+        yield { chunk: intro + result };
+        yield { assistantMessage: { role: 'assistant', content: intro + result } };
+        return;
+      }
+
+      // discard any text Claude emitted before calling the tool (meta-commentary)
 
       const toolResults: Anthropic.ToolResultBlockParam[] = await Promise.all(
         toolUseBlocks.map(async (toolUse) => {

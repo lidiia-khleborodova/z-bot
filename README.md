@@ -1,13 +1,14 @@
 # Z-Emotion Help Center Agent
 
-A conversational support chatbot for Z-Emotion products (z-weave, z-maya, z-unreal). Uses Claude with an agentic tool loop to search help center articles, find sewing patterns, retrieve release notes, and search the web.
+A conversational support chatbot for Z-Emotion products (z-weave, z-maya, z-unreal). Uses Claude with an agentic tool loop to search help center articles, find garment patterns and fabrics, retrieve release notes, and search the web.
 
 ## Architecture
 
 - **Express** server streams responses to the browser
 - **Claude** (claude-sonnet-4-6) decides which tools to call based on the question
-- **OpenAI** text-embedding-3-small for semantic article and pattern search
+- **OpenAI** text-embedding-3-small for semantic article and asset search
 - **Zendesk** Help Center API as the article source (refreshed every 6 hours)
+- **Z-Emotion Asset API** as the source for garment patterns and fabrics (refreshed every 6 hours)
 - **Conversation history** — last 2 exchanges kept per browser session (cleared on refresh)
 
 ### Tools available to Claude
@@ -16,9 +17,11 @@ A conversational support chatbot for Z-Emotion products (z-weave, z-maya, z-unre
 |------|-------------|
 | `search_articles` | Semantic search over Zendesk help center articles |
 | `get_latest_version` | Returns latest release notes for z-weave, z-maya, or z-unreal |
-| `search_patterns` | Searches the sewing pattern asset library (CSV) |
+| `search_patterns` | Searches the asset library for garment patterns (ZLS) and fabrics (U3MA) |
 | `web_search` | Searches z-emotion.com when articles don't answer the question |
 | `web_fetch` | Fetches a specific URL provided by the user |
+
+Asset search results are returned as `ASSET_RESULTS:<json>` and rendered in the browser as a card grid with download links — Claude does not reformat them.
 
 ## Setup
 
@@ -37,21 +40,12 @@ ZENDESK_API_TOKEN=your_zendesk_api_token
 PORT=3000
 ```
 
-**3. Add the pattern CSV**
-
-Place the pattern CSV file at:
-```
-data/zls links sample.csv
-```
-
-Expected columns: `Name`, `Link`, `Gender`, `Type`
-
-**4. Start the server**
+**3. Start the server**
 ```bash
 npm run dev
 ```
 
-On first start it fetches all published Zendesk articles and builds embeddings (~30 seconds).
+On first start it fetches all published Zendesk articles and asset library entries, then builds embeddings for both (~30 seconds).
 
 ## API
 
